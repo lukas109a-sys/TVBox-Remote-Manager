@@ -18,13 +18,21 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import io.github.muntashirakon.adb.AbsAdbConnectionManager
 import io.github.muntashirakon.adb.AdbStream
+import org.bouncycastle.asn1.x500.X500Name
+import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter
+import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder
+import org.bouncycastle.jce.provider.BouncyCastleProvider
+import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.math.BigInteger
 import java.nio.charset.StandardCharsets
+import java.security.KeyPair
 import java.security.KeyPairGenerator
 import java.security.PrivateKey
+import java.security.Security
 import java.security.cert.Certificate
+import java.util.Date
 import java.util.concurrent.Executors
 
 class MainActivity : AppCompatActivity() {
@@ -42,14 +50,13 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
 
         try {
-            setupUi()
-        } catch (e: Throwable) {
-            val tv = TextView(this).apply {
-                text = "Erro ao iniciar tela: ${e.message}"
-                setPadding(32, 64, 32, 32)
+            if (Security.getProvider(BouncyCastleProvider.PROVIDER_NAME) == null) {
+                Security.addProvider(BouncyCastleProvider())
             }
-            setContentView(tv)
+        } catch (_: Throwable) {
         }
+
+        setupUi()
     }
 
     private fun setupUi() {
@@ -176,7 +183,7 @@ class MainActivity : AppCompatActivity() {
         container.addView(grid)
 
         logText = TextView(this).apply {
-            text = "App aberto com sucesso! Digite o IP da TV Box e toque em Conectar."
+            text = "Pronto! Digite o IP da TV Box e toque em Conectar."
             textSize = 12f
             setTextColor(Color.parseColor("#374151"))
             background = createCardBg("#E5E7EB", 14f)
@@ -282,7 +289,7 @@ class MainActivity : AppCompatActivity() {
                     connectBtn.isEnabled = true
                     statusText.text = "● Erro na conexão"
                     statusText.setTextColor(Color.parseColor("#DC2626"))
-                    updateLog("Detalhe: ${e.javaClass.simpleName}: ${e.message}")
+                    updateLog("Detalhe: ${e.javaClass.simpleName}:${e.message}")
                 }
             }
         }
@@ -361,109 +368,4 @@ class MainActivity : AppCompatActivity() {
         executeAdbShell(cmd) { res ->
             updateLog("Launcher alterado para: $componentName\n$res")
             runOnUiThread {
-                Toast.makeText(this, "Launcher ativado na TV!", Toast.LENGTH_SHORT).show()
-            }
-        }
-    }
-
-    private fun openRemoteAppsManager() {
-        updateLog("Carregando lista de apps instalados na TV Box...")
-        executeAdbShell("pm list packages -3") { output ->
-            val pkgs = output.lines()
-                .map { it.removePrefix("package:").trim() }
-                .filter { it.isNotEmpty() }
-                .sorted()
-
-            runOnUiThread {
-                if (pkgs.isEmpty()) {
-                    updateLog("Nenhum app de usuário encontrado.")
-                    return@runOnUiThread
-                }
-                val items = pkgs.toTypedArray()
-                AlertDialog.Builder(this)
-                    .setTitle("Apps na TV Box (${items.size})")
-                    .setItems(items) { _, which ->
-                        val selectedPkg = items[which]
-                        showAppActionsDialog(selectedPkg)
-                    }
-                    .setNegativeButton("Fechar", null)
-                    .show()
-            }
-        }
-    }
-
-    private fun showAppActionsDialog(pkg: String) {
-        val options = arrayOf("▶ Abrir na TV", "🛑 Forçar Parada (Limpar RAM)", "🗑️ Limpar Dados/Cache do App")
-        AlertDialog.Builder(this)
-            .setTitle(pkg)
-            .setItems(options) { _, which ->
-                when (which) {
-                    0 -> executeAdbShell("monkey -p $pkg -c android.intent.category.LAUNCHER 1") {
-                        updateLog("Abrindo $pkg na TV...")
-                    }
-                    1 -> executeAdbShell("am force-stop $pkg") {
-                        updateLog("App $pkg encerrado na TV!")
-                    }
-                    2 -> executeAdbShell("pm clear $pkg") { res ->
-                        updateLog("Dados de $pkg limpos: $res")
-                    }
-                }
-            }
-            .show()
-    }
-
-    private fun openRemoteControllerDialog() {
-        val keys = arrayOf(
-            "⬆️ Cima (KEYCODE_DPAD_UP)" to 19,
-            "⬇️ Baixo (KEYCODE_DPAD_DOWN)" to 20,
-            "⬅️ Esquerda (KEYCODE_DPAD_LEFT)" to 21,
-            "➡️ Direita (KEYCODE_DPAD_RIGHT)" to 22,
-            "🆗 OK / Enter (KEYCODE_DPAD_CENTER)" to 23,
-            "🔙 Voltar (KEYCODE_BACK)" to 4,
-            "🏠 Tela Inicial / Home (KEYCODE_HOME)" to 3,
-            "🔊 Aumentar Volume" to 24,
-            "🔉 Diminuir Volume" to 25
-        )
-        val labels = keys.map { it.first }.toTypedArray()
-
-        AlertDialog.Builder(this)
-            .setTitle("Controle Remoto TV Box")
-            .setItems(labels) { _, which ->
-                val code = keys[which].second
-                executeAdbShell("input keyevent $code") {
-                    updateLog("Comando enviado: ${keys[which].first}")
-                }
-            }
-            .setPositiveButton("Fechar", null)
-            .show()
-    }
-
-    private fun checkTvInfo() {
-        updateLog("Verificando sistema da TV Box...")
-        val cmd = "echo 'Modelo:' \$(getprop ro.product.model) && echo 'Android:' \$(getprop ro.build.version.release) && free -h"
-        executeAdbShell(cmd) { res ->
-            updateLog(res)
-        }
-    }
-
-    private class SimpleAdbManager : AbsAdbConnectionManager() {
-        private val keyPair = KeyPairGenerator.getInstance("RSA").apply {
-            initialize(2048)
-        }.generateKeyPair()
-
-        init {
-            api = Build.VERSION.SDK_INT
-        }
-
-        override fun getPrivateKey(): PrivateKey = keyPair.private
-
-        override fun getCertificate(): Certificate {
-            // Retorna certificado compatível com a assinatura ADB padrão
-            val kpg = KeyPairGenerator.getInstance("RSA")
-            kpg.initialize(2048)
-            throw IllegalStateException("Use o fluxo de pareamento ADB compatível")
-        }
-
-        override fun getDeviceName(): String = "TVBoxManagerMobile"
-    }
-}
+                Toast.makeText(this, "Launcher ativ
