@@ -18,21 +18,12 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import io.github.muntashirakon.adb.AbsAdbConnectionManager
 import io.github.muntashirakon.adb.AdbStream
-import org.bouncycastle.asn1.x500.X500Name
-import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter
-import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder
-import org.bouncycastle.jce.provider.BouncyCastleProvider
-import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder
 import java.io.BufferedReader
 import java.io.InputStreamReader
-import java.math.BigInteger
 import java.nio.charset.StandardCharsets
-import java.security.KeyPair
 import java.security.KeyPairGenerator
 import java.security.PrivateKey
-import java.security.Security
 import java.security.cert.Certificate
-import java.util.Date
 import java.util.concurrent.Executors
 
 class MainActivity : AppCompatActivity() {
@@ -43,19 +34,11 @@ class MainActivity : AppCompatActivity() {
     private lateinit var logText: TextView
 
     private val executor = Executors.newSingleThreadExecutor()
-    private var adbManager: SimpleAdbManager? = null
+    private var adbManager: AbsAdbConnectionManager? = null
     private var isConnected = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
-        try {
-            if (Security.getProvider(BouncyCastleProvider.PROVIDER_NAME) == null) {
-                Security.addProvider(BouncyCastleProvider())
-            }
-        } catch (_: Throwable) {
-        }
-
         setupUi()
     }
 
@@ -183,7 +166,7 @@ class MainActivity : AppCompatActivity() {
         container.addView(grid)
 
         logText = TextView(this).apply {
-            text = "Pronto! Digite o IP da TV Box e toque em Conectar."
+            text = "App iniciado! Digite o IP da TV Box e toque em Conectar."
             textSize = 12f
             setTextColor(Color.parseColor("#374151"))
             background = createCardBg("#E5E7EB", 14f)
@@ -259,14 +242,29 @@ class MainActivity : AppCompatActivity() {
 
     private fun connectToTv(ip: String) {
         getSharedPreferences("tv_prefs", MODE_PRIVATE).edit().putString("last_ip", ip).apply()
-        statusText.text = "● Conectando em $ip:5555... (Olhe a TV e permita a depuração)"
+        statusText.text = "● Conectando em $ip:5555..."
         statusText.setTextColor(Color.parseColor("#D97706"))
         connectBtn.isEnabled = false
 
         executor.execute {
             try {
                 adbManager?.disconnect()
-                val manager = SimpleAdbManager()
+                val manager = object : AbsAdbConnectionManager() {
+                    private val kp = KeyPairGenerator.getInstance("RSA").apply { initialize(2048) }.generateKeyPair()
+
+                    init {
+                        api = Build.VERSION.SDK_INT
+                    }
+
+                    override fun getPrivateKey(): PrivateKey = kp.private
+
+                    override fun getCertificate(): Certificate {
+                        throw IllegalStateException("Certificado X.509 ainda não configurado")
+                    }
+
+                    override fun getDeviceName(): String = "TVBoxManagerMobile"
+                }
+
                 val connected = manager.connect(ip, 5555)
                 adbManager = manager
                 isConnected = connected
@@ -276,11 +274,11 @@ class MainActivity : AppCompatActivity() {
                     if (connected) {
                         statusText.text = "● Conectado em $ip:5555"
                         statusText.setTextColor(Color.parseColor("#15803D"))
-                        updateLog("Conectado à TV Box! Escolha uma opção acima.")
+                        updateLog("Conectado à TV Box!")
                     } else {
                         statusText.text = "● Falha ao conectar"
                         statusText.setTextColor(Color.parseColor("#DC2626"))
-                        updateLog("Não conectou em $ip:5555. Confirme se a Depuração USB/Rede está ligada na TV Box.")
+                        updateLog("Não conectou em $ip:5555.")
                     }
                 }
             } catch (e: Throwable) {
@@ -289,7 +287,7 @@ class MainActivity : AppCompatActivity() {
                     connectBtn.isEnabled = true
                     statusText.text = "● Erro na conexão"
                     statusText.setTextColor(Color.parseColor("#DC2626"))
-                    updateLog("Detalhe: ${e.javaClass.simpleName}:${e.message}")
+                    updateLog("Erro: ${e.javaClass.simpleName}: ${e.message}")
                 }
             }
         }
@@ -368,4 +366,88 @@ class MainActivity : AppCompatActivity() {
         executeAdbShell(cmd) { res ->
             updateLog("Launcher alterado para: $componentName\n$res")
             runOnUiThread {
-                Toast.makeText(this, "Launcher ativ
+                Toast.makeText(this, "Launcher ativado na TV!", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    private fun openRemoteAppsManager() {
+        updateLog("Carregando lista de apps instalados na TV Box...")
+        executeAdbShell("pm list packages -3") { output ->
+            val pkgs = output.lines()
+                .map { it.removePrefix("package:").trim() }
+                .filter { it.isNotEmpty() }
+                .sorted()
+
+            runOnUiThread {
+                if (pkgs.isEmpty()) {
+                    updateLog("Nenhum app de usuário encontrado.")
+                    return@runOnUiThread
+                }
+                val items = pkgs.toTypedArray()
+                AlertDialog.Builder(this)
+                    .setTitle("Apps na TV Box (${items.size})")
+                    .setItems(items) { _, which ->
+                        val selectedPkg = items[which]
+                        showAppActionsDialog(selectedPkg)
+                    }
+                    .setNegativeButton("Fechar", null)
+                    .show()
+            }
+        }
+    }
+
+    private fun showAppActionsDialog(pkg: String) {
+        val options = arrayOf("▶ Abrir na TV", "🛑 Forçar Parada (Limpar RAM)", "🗑️ Limpar Dados/Cache do App")
+        AlertDialog.Builder(this)
+            .setTitle(pkg)
+            .setItems(options) { _, which ->
+                when (which) {
+                    0 -> executeAdbShell("monkey -p $pkg -c android.intent.category.LAUNCHER 1") {
+                        updateLog("Abrindo $pkg na TV...")
+                    }
+                    1 -> executeAdbShell("am force-stop $pkg") {
+                        updateLog("App $pkg encerrado na TV!")
+                    }
+                    2 -> executeAdbShell("pm clear $pkg") { res ->
+                        updateLog("Dados de $pkg limpos: $res")
+                    }
+                }
+            }
+            .show()
+    }
+
+    private fun openRemoteControllerDialog() {
+        val keys = arrayOf(
+            "⬆️ Cima (KEYCODE_DPAD_UP)" to 19,
+            "⬇️ Baixo (KEYCODE_DPAD_DOWN)" to 20,
+            "⬅️ Esquerda (KEYCODE_DPAD_LEFT)" to 21,
+            "➡️ Direita (KEYCODE_DPAD_RIGHT)" to 22,
+            "🆗 OK / Enter (KEYCODE_DPAD_CENTER)" to 23,
+            "🔙 Voltar (KEYCODE_BACK)" to 4,
+            "🏠 Tela Inicial / Home (KEYCODE_HOME)" to 3,
+            "🔊 Aumentar Volume" to 24,
+            "🔉 Diminuir Volume" to 25
+        )
+        val labels = keys.map { it.first }.toTypedArray()
+
+        AlertDialog.Builder(this)
+            .setTitle("Controle Remoto TV Box")
+            .setItems(labels) { _, which ->
+                val code = keys[which].second
+                executeAdbShell("input keyevent $code") {
+                    updateLog("Comando enviado: ${keys[which].first}")
+                }
+            }
+            .setPositiveButton("Fechar", null)
+            .show()
+    }
+
+    private fun checkTvInfo() {
+        updateLog("Verificando sistema da TV Box...")
+        val cmd = "echo 'Modelo:' \$(getprop ro.product.model) && echo 'Android:' \$(getprop ro.build.version.release) && free -h"
+        executeAdbShell(cmd) { res ->
+            updateLog(res)
+        }
+    }
+}
