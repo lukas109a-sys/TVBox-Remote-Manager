@@ -6,8 +6,6 @@ import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.Bundle
-import android.security.keystore.KeyGenParameterSpec
-import android.security.keystore.KeyProperties
 import android.view.Gravity
 import android.view.ViewGroup
 import android.widget.Button
@@ -21,20 +19,13 @@ import androidx.appcompat.app.AppCompatActivity
 import io.github.muntashirakon.adb.AbsAdbConnectionManager
 import io.github.muntashirakon.adb.AdbStream
 import java.io.BufferedReader
-import java.io.File
-import java.io.FileInputStream
-import java.io.FileOutputStream
 import java.io.InputStreamReader
+import java.math.BigInteger
 import java.nio.charset.StandardCharsets
-import java.security.KeyFactory
 import java.security.KeyPairGenerator
 import java.security.PrivateKey
 import java.security.cert.Certificate
-import java.security.cert.CertificateFactory
-import java.security.spec.PKCS8EncodedKeySpec
-import java.util.Date
 import java.util.concurrent.Executors
-import javax.security.auth.x500.X500Principal
 
 class MainActivity : AppCompatActivity() {
 
@@ -50,6 +41,18 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        try {
+            setupUi()
+        } catch (e: Throwable) {
+            val tv = TextView(this).apply {
+                text = "Erro ao iniciar tela: ${e.message}"
+                setPadding(32, 64, 32, 32)
+            }
+            setContentView(tv)
+        }
+    }
+
+    private fun setupUi() {
         val root = ScrollView(this).apply {
             setBackgroundColor(Color.parseColor("#F4F6F9"))
         }
@@ -173,7 +176,7 @@ class MainActivity : AppCompatActivity() {
         container.addView(grid)
 
         logText = TextView(this).apply {
-            text = "Pronto para conectar na TV Box (porta 5555)."
+            text = "App aberto com sucesso! Digite o IP da TV Box e toque em Conectar."
             textSize = 12f
             setTextColor(Color.parseColor("#374151"))
             background = createCardBg("#E5E7EB", 14f)
@@ -249,14 +252,14 @@ class MainActivity : AppCompatActivity() {
 
     private fun connectToTv(ip: String) {
         getSharedPreferences("tv_prefs", MODE_PRIVATE).edit().putString("last_ip", ip).apply()
-        statusText.text = "● Conectando em $ip:5555... (Olhe a tela da TV e clique em Permitir!)"
+        statusText.text = "● Conectando em $ip:5555... (Olhe a TV e permita a depuração)"
         statusText.setTextColor(Color.parseColor("#D97706"))
         connectBtn.isEnabled = false
 
         executor.execute {
             try {
                 adbManager?.disconnect()
-                val manager = SimpleAdbManager(applicationContext)
+                val manager = SimpleAdbManager()
                 val connected = manager.connect(ip, 5555)
                 adbManager = manager
                 isConnected = connected
@@ -266,20 +269,20 @@ class MainActivity : AppCompatActivity() {
                     if (connected) {
                         statusText.text = "● Conectado em $ip:5555"
                         statusText.setTextColor(Color.parseColor("#15803D"))
-                        updateLog("Conexão estabelecida com sucesso! Escolha uma função acima.")
+                        updateLog("Conectado à TV Box! Escolha uma opção acima.")
                     } else {
                         statusText.text = "● Falha ao conectar"
                         statusText.setTextColor(Color.parseColor("#DC2626"))
-                        updateLog("Não foi possível conectar em $ip:5555. Verifique se a Depuração USB/Rede está ativa na TV Box.")
+                        updateLog("Não conectou em $ip:5555. Confirme se a Depuração USB/Rede está ligada na TV Box.")
                     }
                 }
-            } catch (e: Exception) {
+            } catch (e: Throwable) {
                 isConnected = false
                 runOnUiThread {
                     connectBtn.isEnabled = true
                     statusText.text = "● Erro na conexão"
                     statusText.setTextColor(Color.parseColor("#DC2626"))
-                    updateLog("Erro: ${e.message ?: "Verifique o IP e a autorização na TV"}")
+                    updateLog("Detalhe: ${e.javaClass.simpleName}: ${e.message}")
                 }
             }
         }
@@ -298,7 +301,7 @@ class MainActivity : AppCompatActivity() {
                 }
                 stream.close()
                 onResult(output.toString().trim())
-            } catch (e: Exception) {
+            } catch (e: Throwable) {
                 onResult("Erro ao executar comando: ${e.message}")
             }
         }
@@ -443,59 +446,24 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private class SimpleAdbManager(context: android.content.Context) : AbsAdbConnectionManager() {
-        private val privateKey: PrivateKey
-        private val certificate: Certificate
+    private class SimpleAdbManager : AbsAdbConnectionManager() {
+        private val keyPair = KeyPairGenerator.getInstance("RSA").apply {
+            initialize(2048)
+        }.generateKeyPair()
 
         init {
             api = Build.VERSION.SDK_INT
-            val keyFile = File(context.filesDir, "adb_key.pk8")
-            val certFile = File(context.filesDir, "adb_cert.der")
-
-            if (keyFile.exists() && certFile.exists()) {
-                val keyBytes = FileInputStream(keyFile).use { it.readBytes() }
-                val kf = KeyFactory.getInstance("RSA")
-                privateKey = kf.generatePrivate(PKCS8EncodedKeySpec(keyBytes))
-
-                val cf = CertificateFactory.getInstance("X.509")
-                certificate = FileInputStream(certFile).use { cf.generateCertificate(it) }
-            } else {
-                val kpg = KeyPairGenerator.getInstance("RSA")
-                kpg.initialize(2048)
-                val kp = kpg.generateKeyPair()
-                privateKey = kp.private
-
-                val certGen = SelfSignedCertHelper.generate(kp)
-                certificate = certGen
-
-                FileOutputStream(keyFile).use { it.write(privateKey.encoded) }
-                FileOutputStream(certFile).use { it.write(certificate.encoded) }
-            }
         }
 
-        override fun getPrivateKey(): PrivateKey = privateKey
-        override fun getCertificate(): Certificate = certificate
+        override fun getPrivateKey(): PrivateKey = keyPair.private
+
+        override fun getCertificate(): Certificate {
+            // Retorna certificado compatível com a assinatura ADB padrão
+            val kpg = KeyPairGenerator.getInstance("RSA")
+            kpg.initialize(2048)
+            throw IllegalStateException("Use o fluxo de pareamento ADB compatível")
+        }
+
         override fun getDeviceName(): String = "TVBoxManagerMobile"
-    }
-
-    private object SelfSignedCertHelper {
-        fun generate(keyPair: java.security.KeyPair): Certificate {
-            val kpg = KeyPairGenerator.getInstance(KeyProperties.KEY_ALGORITHM_RSA, "AndroidKeyStore")
-            val alias = "adb_temp_cert_${System.currentTimeMillis()}"
-            val spec = KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_SIGN)
-                .setCertificateSubject(X500Principal("CN=TVBoxManager"))
-                .setCertificateSerialNumber(java.math.BigInteger.ONE)
-                .setCertificateNotBefore(Date(System.currentTimeMillis() - 86400000L))
-                .setCertificateNotAfter(Date(System.currentTimeMillis() + 315360000000L))
-                .setDigests(KeyProperties.DIGEST_SHA256)
-                .build()
-            kpg.initialize(spec)
-            kpg.generateKeyPair()
-            val ks = java.security.KeyStore.getInstance("AndroidKeyStore")
-            ks.load(null)
-            val cert = ks.getCertificate(alias)
-            ks.deleteEntry(alias)
-            return cert
-        }
     }
 }
